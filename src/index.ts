@@ -103,7 +103,8 @@ const READ_ONLY_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        emailId: { type: "string", description: "Email ID to retrieve" }
+        emailId: { type: "string", description: "Email ID to retrieve" },
+        folder: { type: "string", description: "Folder to search in (optional, uses cached folder or INBOX)" }
       },
       required: ["emailId"]
     }
@@ -277,16 +278,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const limit = (args?.limit as number) || 20;
         const offset = (args?.offset as number) || 0;
 
-        const emails = await imapService.getEmails(folder, limit, offset);
-        analyticsService.updateWithEmails(emails);
+        const result = await imapService.getEmails(folder, limit, offset);
+        analyticsService.updateWithEmails(result.emails);
 
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
               folder,
-              count: emails.length,
-              emails: emails.map(e => ({
+              count: result.emails.length,
+              totalMessages: result.totalMessages,
+              hasMore: result.hasMore,
+              emails: result.emails.map(e => ({
                 id: e.id,
                 from: e.from,
                 to: e.to,
@@ -303,11 +306,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "get_email_by_id": {
         const emailId = args?.emailId as string;
+        const folder = args?.folder as string | undefined;
         if (!emailId) {
           throw new McpError(ErrorCode.InvalidParams, "emailId is required");
         }
 
-        const email = await imapService.getEmailById(emailId);
+        const email = await imapService.getEmailById(emailId, folder);
         if (!email) {
           return {
             content: [{ type: "text", text: JSON.stringify({ error: "Email not found" }) }]

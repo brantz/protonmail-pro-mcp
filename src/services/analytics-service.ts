@@ -12,7 +12,7 @@ interface DailyVolume {
 }
 
 export class AnalyticsService {
-  private emailData: Email[] = [];
+  private emailData: Map<string, Email> = new Map();
   private contacts: Map<string, Contact> = new Map();
   private stats: EmailStats = {
     totalEmails: 0,
@@ -24,23 +24,27 @@ export class AnalyticsService {
   };
 
   updateWithEmails(emails: Email[]): void {
-    this.emailData = emails;
+    // Merge new emails into existing data (deduplication by ID)
+    for (const email of emails) {
+      this.emailData.set(email.id, email);
+    }
     this.recalculateStats();
     this.updateContacts();
-    logger.debug(`Analytics updated with ${emails.length} emails`, 'AnalyticsService');
+    logger.debug(`Analytics updated with ${emails.length} new emails (total: ${this.emailData.size})`, 'AnalyticsService');
   }
 
   private recalculateStats(): void {
+    const allEmails = Array.from(this.emailData.values());
     this.stats = {
-      totalEmails: this.emailData.length,
-      unreadEmails: this.emailData.filter(e => !e.isRead).length,
-      sentEmails: this.emailData.filter(e => e.folder.toLowerCase() === 'sent').length,
-      receivedEmails: this.emailData.filter(e => e.folder.toLowerCase() === 'inbox').length,
-      starredEmails: this.emailData.filter(e => e.isStarred).length,
+      totalEmails: allEmails.length,
+      unreadEmails: allEmails.filter(e => !e.isRead).length,
+      sentEmails: allEmails.filter(e => e.folder.toLowerCase() === 'sent').length,
+      receivedEmails: allEmails.filter(e => e.folder.toLowerCase() === 'inbox').length,
+      starredEmails: allEmails.filter(e => e.isStarred).length,
       folderCounts: {},
     };
 
-    for (const email of this.emailData) {
+    for (const email of allEmails) {
       const folder = email.folder || 'Unknown';
       this.stats.folderCounts[folder] = (this.stats.folderCounts[folder] || 0) + 1;
     }
@@ -49,7 +53,7 @@ export class AnalyticsService {
   private updateContacts(): void {
     this.contacts.clear();
 
-    for (const email of this.emailData) {
+    for (const email of this.emailData.values()) {
       // Track senders
       for (const from of email.from) {
         const addr = from.address.toLowerCase();
@@ -127,7 +131,7 @@ export class AnalyticsService {
     }
 
     // Count emails per day
-    for (const email of this.emailData) {
+    for (const email of this.emailData.values()) {
       if (email.date < cutoff) continue;
       const dateStr = email.date.toISOString().split('T')[0];
       const existing = trends.get(dateStr);
@@ -144,7 +148,7 @@ export class AnalyticsService {
   }
 
   clearCache(): void {
-    this.emailData = [];
+    this.emailData.clear();
     this.contacts.clear();
     this.stats = {
       totalEmails: 0,

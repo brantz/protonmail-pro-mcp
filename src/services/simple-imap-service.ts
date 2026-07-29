@@ -13,6 +13,7 @@ export class SimpleIMAPService {
   private isConnected: boolean = false;
   private emailCache: Map<string, Email> = new Map();
   private folderCache: Folder[] = [];
+  private emailFolderMap: Map<string, string> = new Map(); // emailId -> folder
 
   async connect(): Promise<void> {
     const host = process.env.PROTONMAIL_IMAP_HOST || 'localhost';
@@ -65,13 +66,31 @@ export class SimpleIMAPService {
 
     try {
       const mailboxes = await this.client.list();
-      this.folderCache = mailboxes.map(mb => ({
-        name: mb.name,
-        path: mb.path,
-        delimiter: mb.delimiter,
-        totalMessages: 0,
-        unreadMessages: 0,
-      }));
+      const folders: Folder[] = [];
+
+      for (const mb of mailboxes) {
+        try {
+          const status = await this.client.status(mb.path, { messages: true, unseen: true });
+          folders.push({
+            name: mb.name,
+            path: mb.path,
+            delimiter: mb.delimiter,
+            totalMessages: status.messages || 0,
+            unreadMessages: status.unseen || 0,
+          });
+        } catch {
+          // If status fails for a folder, use defaults
+          folders.push({
+            name: mb.name,
+            path: mb.path,
+            delimiter: mb.delimiter,
+            totalMessages: 0,
+            unreadMessages: 0,
+          });
+        }
+      }
+
+      this.folderCache = folders;
       return this.folderCache;
     } catch (error) {
       logger.error('Failed to get folders', 'IMAPService', error);
@@ -79,41 +98,68 @@ export class SimpleIMAPService {
     }
   }
 
-  async getEmails(folder: string = 'INBOX', limit: number = 50, offset: number = 0): Promise<Email[]> {
+  async getEmails(folder: string = 'INBOX', limit: number = 50, offset: number = 0): Promise<{ emails: Email[]; totalMessages: number; hasMore: boolean }> {
     if (!this.client || !this.isConnected) {
       throw new Error('IMAP not connected');
     }
 
     const emails: Email[] = [];
+    let totalMessages = 0;
 
     try {
       const lock = await this.client.getMailboxLock(folder);
       try {
-        const status = await this.client.status(folder, { messages: true });
-        const total = status.messages || 0;
+        // Use mailbox.exists after selecting folder (more reliable than status)
+        const mailbox = this.client.mailbox;
+        totalMessages = mailbox ? (mailbox as { exists: number }).exists : 0;
 
-        if (total === 0) {
-          return emails;
+        if (totalMessages === 0) {
+          return { emails, totalMessages: 0, hasMore: false };
         }
 
-        const start = Math.max(1, total - offset - limit + 1);
-        const end = Math.max(1, total - offset);
+        // Search all emails in folder (no date restriction)
+        const allUids = await this.client.search({ all: true }, { uid: true });
+        let recentUids = allUids;
 
-        if (start > end) {
-          return emails;
+        if (!recentUids || recentUids.length === 0) {
+          return { emails, totalMessages, hasMore: false };
         }
 
-        for await (const message of this.client.fetch(`${start}:${end}`, {
+        // Fetch envelopes to get dates for proper sorting
+        const emailsWithDates: { uid: number; date: Date }[] = [];
+
+        for await (const message of this.client.fetch(recentUids, {
+          envelope: true,
+          uid: true,
+        }, { uid: true })) {
+          const date = message.envelope?.date || new Date(0);
+          emailsWithDates.push({ uid: message.uid, date });
+        }
+
+        // Sort by date descending (newest first)
+        emailsWithDates.sort((a, b) => b.date.getTime() - a.date.getTime());
+
+        // Apply pagination
+        const paginatedUids = emailsWithDates.slice(offset, offset + limit).map(e => e.uid);
+
+        if (paginatedUids.length === 0) {
+          return { emails, totalMessages, hasMore: false };
+        }
+
+        // Now fetch full content for the paginated UIDs
+        for await (const message of this.client.fetch(paginatedUids, {
           envelope: true,
           source: true,
           flags: true,
-        })) {
+          uid: true,
+        }, { uid: true })) {
           try {
             if (!message.source) continue;
             const parsed = await simpleParser(message.source);
             const email = this.parsedMailToEmail(parsed, message, folder);
             emails.push(email);
             this.emailCache.set(email.id, email);
+            this.emailFolderMap.set(email.id, folder);
           } catch (parseError) {
             logger.warn('Failed to parse email', 'IMAPService', parseError);
           }
@@ -126,13 +172,56 @@ export class SimpleIMAPService {
       throw error;
     }
 
-    return emails.reverse();
+    // Sort by date descending (newest first) to ensure correct order
+    emails.sort((a, b) => b.date.getTime() - a.date.getTime());
+
+    const hasMore = offset + emails.length < totalMessages;
+    return { emails, totalMessages, hasMore };
   }
 
-  async getEmailById(emailId: string): Promise<Email | null> {
+  async getEmailById(emailId: string, folder?: string): Promise<Email | null> {
+    // Check cache first
     if (this.emailCache.has(emailId)) {
       return this.emailCache.get(emailId) || null;
     }
+
+    // If not in cache, try to fetch from IMAP
+    if (!this.client || !this.isConnected) {
+      return null;
+    }
+
+    // Determine folder to search
+    const targetFolder = folder || this.emailFolderMap.get(emailId) || 'INBOX';
+
+    try {
+      const lock = await this.client.getMailboxLock(targetFolder);
+      try {
+        // Fetch by UID
+        const uid = parseInt(emailId, 10);
+        if (isNaN(uid)) {
+          return null;
+        }
+
+        for await (const message of this.client.fetch(uid, {
+          envelope: true,
+          source: true,
+          flags: true,
+          uid: true,
+        }, { uid: true })) {
+          if (!message.source) continue;
+          const parsed = await simpleParser(message.source);
+          const email = this.parsedMailToEmail(parsed, message, targetFolder);
+          this.emailCache.set(email.id, email);
+          this.emailFolderMap.set(email.id, targetFolder);
+          return email;
+        }
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.warn(`Failed to fetch email by ID: ${emailId}`, 'IMAPService', error);
+    }
+
     return null;
   }
 
@@ -141,7 +230,8 @@ export class SimpleIMAPService {
       throw new Error('IMAP not connected');
     }
 
-    const folder = options.folder || 'INBOX';
+    // Use "All Mail" folder by default to search across all emails
+    const folder = options.folder || 'All Mail';
     const emails: Email[] = [];
 
     try {
@@ -150,6 +240,10 @@ export class SimpleIMAPService {
         // Build search query
         const searchQuery: Record<string, unknown> = {};
 
+        // Use IMAP TEXT search for query - searches both headers and body
+        if (options.query) {
+          searchQuery.text = options.query;
+        }
         if (options.from) {
           searchQuery.from = options.from;
         }
@@ -179,35 +273,35 @@ export class SimpleIMAPService {
           searchQuery.all = true;
         }
 
-        const results = await this.client.search(searchQuery as any);
+        logger.info(`Searching in folder "${folder}" with query: ${JSON.stringify(searchQuery)}`, 'IMAPService');
+
+        const results = await this.client.search(searchQuery as any, { uid: true });
 
         const limit = options.limit || 100;
         if (!results || !Array.isArray(results) || results.length === 0) {
+          logger.info(`No results found for search`, 'IMAPService');
           return emails;
         }
+
+        logger.info(`Found ${results.length} matching emails, fetching last ${limit}`, 'IMAPService');
+
+        // Get the most recent matches (last N UIDs since UIDs are sequential)
         const uids = results.slice(-limit);
 
         for await (const message of this.client.fetch(uids, {
           envelope: true,
           source: true,
           flags: true,
-        })) {
+          uid: true,
+        }, { uid: true })) {
           try {
             if (!message.source) continue;
             const parsed = await simpleParser(message.source);
             const email = this.parsedMailToEmail(parsed, message, folder);
 
-            // Additional filtering for query text
-            if (options.query) {
-              const queryLower = options.query.toLowerCase();
-              const matchesQuery =
-                email.subject.toLowerCase().includes(queryLower) ||
-                email.body.toLowerCase().includes(queryLower);
-              if (!matchesQuery) continue;
-            }
-
             emails.push(email);
             this.emailCache.set(email.id, email);
+            this.emailFolderMap.set(email.id, folder);
           } catch (parseError) {
             logger.warn('Failed to parse email in search', 'IMAPService', parseError);
           }
@@ -220,32 +314,136 @@ export class SimpleIMAPService {
       throw error;
     }
 
-    return emails;
+    // Sort by date newest-first
+    return emails.sort((a, b) => b.date.getTime() - a.date.getTime());
   }
 
   async markAsRead(emailId: string, isRead: boolean = true): Promise<void> {
-    logger.info(`Mark as read not fully implemented: ${emailId} -> ${isRead}`, 'IMAPService');
-    const email = this.emailCache.get(emailId);
-    if (email) {
-      email.isRead = isRead;
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
+    const folder = this.emailFolderMap.get(emailId) || 'INBOX';
+    const uid = parseInt(emailId, 10);
+    if (isNaN(uid)) {
+      throw new Error(`Invalid email ID: ${emailId}`);
+    }
+
+    try {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        if (isRead) {
+          await this.client.messageFlagsAdd(uid, ['\\Seen'], { uid: true });
+        } else {
+          await this.client.messageFlagsRemove(uid, ['\\Seen'], { uid: true });
+        }
+        // Update cache
+        const email = this.emailCache.get(emailId);
+        if (email) {
+          email.isRead = isRead;
+        }
+        logger.info(`Marked email ${emailId} as ${isRead ? 'read' : 'unread'}`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to mark email as read: ${emailId}`, 'IMAPService', error);
+      throw error;
     }
   }
 
   async starEmail(emailId: string, isStarred: boolean = true): Promise<void> {
-    logger.info(`Star email not fully implemented: ${emailId} -> ${isStarred}`, 'IMAPService');
-    const email = this.emailCache.get(emailId);
-    if (email) {
-      email.isStarred = isStarred;
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
+    const folder = this.emailFolderMap.get(emailId) || 'INBOX';
+    const uid = parseInt(emailId, 10);
+    if (isNaN(uid)) {
+      throw new Error(`Invalid email ID: ${emailId}`);
+    }
+
+    try {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        if (isStarred) {
+          await this.client.messageFlagsAdd(uid, ['\\Flagged'], { uid: true });
+        } else {
+          await this.client.messageFlagsRemove(uid, ['\\Flagged'], { uid: true });
+        }
+        // Update cache
+        const email = this.emailCache.get(emailId);
+        if (email) {
+          email.isStarred = isStarred;
+        }
+        logger.info(`${isStarred ? 'Starred' : 'Unstarred'} email ${emailId}`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to star email: ${emailId}`, 'IMAPService', error);
+      throw error;
     }
   }
 
   async moveEmail(emailId: string, targetFolder: string): Promise<void> {
-    logger.info(`Move email not fully implemented: ${emailId} -> ${targetFolder}`, 'IMAPService');
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
+    const sourceFolder = this.emailFolderMap.get(emailId) || 'INBOX';
+    const uid = parseInt(emailId, 10);
+    if (isNaN(uid)) {
+      throw new Error(`Invalid email ID: ${emailId}`);
+    }
+
+    try {
+      const lock = await this.client.getMailboxLock(sourceFolder);
+      try {
+        await this.client.messageMove(uid, targetFolder, { uid: true });
+        // Update folder mapping
+        this.emailFolderMap.set(emailId, targetFolder);
+        // Update cache
+        const email = this.emailCache.get(emailId);
+        if (email) {
+          email.folder = targetFolder;
+        }
+        logger.info(`Moved email ${emailId} from ${sourceFolder} to ${targetFolder}`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to move email: ${emailId}`, 'IMAPService', error);
+      throw error;
+    }
   }
 
   async deleteEmail(emailId: string): Promise<void> {
-    logger.info(`Delete email not fully implemented: ${emailId}`, 'IMAPService');
-    this.emailCache.delete(emailId);
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP not connected');
+    }
+
+    const folder = this.emailFolderMap.get(emailId) || 'INBOX';
+    const uid = parseInt(emailId, 10);
+    if (isNaN(uid)) {
+      throw new Error(`Invalid email ID: ${emailId}`);
+    }
+
+    try {
+      const lock = await this.client.getMailboxLock(folder);
+      try {
+        await this.client.messageDelete(uid, { uid: true });
+        // Clear from cache
+        this.emailCache.delete(emailId);
+        this.emailFolderMap.delete(emailId);
+        logger.info(`Deleted email ${emailId}`, 'IMAPService');
+      } finally {
+        lock.release();
+      }
+    } catch (error) {
+      logger.error(`Failed to delete email: ${emailId}`, 'IMAPService', error);
+      throw error;
+    }
   }
 
   async syncFolder(folder: string): Promise<void> {
@@ -256,6 +454,7 @@ export class SimpleIMAPService {
   clearCache(): void {
     this.emailCache.clear();
     this.folderCache = [];
+    this.emailFolderMap.clear();
     logger.info('Cache cleared', 'IMAPService');
   }
 
