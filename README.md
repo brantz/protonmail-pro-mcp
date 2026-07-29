@@ -69,7 +69,25 @@ PROTONMAIL_IMAP_PORT=1143
 
 # Optional: Debug Mode
 DEBUG=true
+
+# Optional: Capability tiers (both default to the safe setting)
+# READ_ONLY_MODE=true blocks send_email, delete_email, move_email,
+# mark_email_read and star_email. It is the default.
+READ_ONLY_MODE=true
+# ALLOW_DRAFTS=true enables create_draft on its own, without unlocking
+# sending or deleting. A draft is written to the Drafts folder and stays
+# there until a human sends it, so it is safe to grant to an agent while
+# READ_ONLY_MODE remains true.
+ALLOW_DRAFTS=true
 ```
+
+### Capability tiers
+
+| Setting | Reading | `create_draft` | Send / delete / move |
+|---|---|---|---|
+| default | yes | no | no |
+| `ALLOW_DRAFTS=true` | yes | yes | no |
+| `READ_ONLY_MODE=false` | yes | yes | yes |
 
 ### Installation
 
@@ -106,6 +124,18 @@ Add to your Claude Desktop MCP configuration:
 ### 📧 Email Sending Operations
 - `send_email` - Advanced email sending with all features
 - `send_test_email` - Quick test email functionality
+
+### 📝 Draft Operations (requires `ALLOW_DRAFTS=true`)
+- `create_draft` - Store a message in the Drafts folder via IMAP APPEND. Nothing
+  is sent. Handles RFC 2047 subject encoding for umlauts and CRLF normalisation.
+
+**Verified Proton Bridge behaviour (2026-07-29):** the Bridge rewrites the
+message on APPEND. It assigns its own `Message-Id`, replaces `References` with
+an internal id and **drops `In-Reply-To`**, so a draft does not thread onto an
+existing conversation in Proton Mail. Subject, From, To, Cc and body survive
+intact (the body is re-encoded as quoted-printable). The `inReplyTo` and
+`references` parameters are still emitted for correctness on other IMAP servers,
+but do not rely on them for threading in Proton.
 
 ### 📬 Email Reading Operations  
 - `get_emails` - Fetch emails with pagination

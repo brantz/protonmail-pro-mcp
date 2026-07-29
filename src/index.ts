@@ -39,6 +39,9 @@ const PROTONMAIL_IMAP_HOST = process.env.PROTONMAIL_IMAP_HOST || "127.0.0.1";
 const PROTONMAIL_IMAP_PORT = parseInt(process.env.PROTONMAIL_IMAP_PORT || "1143", 10);
 const DEBUG = process.env.DEBUG === "true";
 const READ_ONLY_MODE = process.env.READ_ONLY_MODE !== "false"; // Default: true (safe)
+// Drafts are their own tier: a draft is never sent and destroys nothing, so it
+// can be allowed without opening up send/delete.
+const ALLOW_DRAFTS = process.env.ALLOW_DRAFTS === "true" || !READ_ONLY_MODE;
 
 // Validate required environment variables
 if (!PROTONMAIL_USERNAME || !PROTONMAIL_PASSWORD) {
@@ -53,6 +56,10 @@ if (READ_ONLY_MODE) {
   logger.info("Running in READ-ONLY mode - send/delete operations disabled", "MCPServer");
 } else {
   logger.warn("Running in FULL ACCESS mode - send/delete operations enabled", "MCPServer");
+}
+
+if (ALLOW_DRAFTS && READ_ONLY_MODE) {
+  logger.info("Draft creation enabled (ALLOW_DRAFTS) - sending stays disabled", "MCPServer");
 }
 
 // Create configuration
@@ -165,6 +172,37 @@ const READ_ONLY_TOOLS = [
   }
 ];
 
+const DRAFT_TOOLS = [
+  {
+    name: "create_draft",
+    description:
+      "Save an email as a draft in Proton Mail. Nothing is sent: the draft waits in the Drafts folder until a human opens and sends it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: { type: "string", description: "Recipient email address(es), comma-separated" },
+        cc: { type: "string", description: "CC recipients, comma-separated" },
+        bcc: { type: "string", description: "BCC recipients, comma-separated" },
+        subject: { type: "string", description: "Email subject (umlauts are encoded automatically)" },
+        body: { type: "string", description: "Email body content" },
+        isHtml: { type: "boolean", description: "Whether body is HTML", default: false },
+        from: { type: "string", description: "Sender address (defaults to the configured mailbox)" },
+        inReplyTo: {
+          type: "string",
+          description:
+            "Message-Id of the email being replied to. Note: Proton Bridge rewrites drafts on APPEND and discards this header, so it does NOT thread the draft in Proton Mail. Kept for other IMAP servers and for when the message is sent."
+        },
+        references: {
+          type: "string",
+          description:
+            "Full References chain, space-separated; defaults to inReplyTo alone. Proton Bridge replaces it with its own internal id (see inReplyTo)."
+        }
+      },
+      required: ["to", "subject", "body"]
+    }
+  }
+];
+
 const WRITE_TOOLS = [
   {
     name: "send_email",
@@ -246,11 +284,16 @@ const server = new Server(
 
 // List available tools based on mode
 server.setRequestHandler(ListToolsRequestSchema, async () => {
-  const tools = READ_ONLY_MODE
-    ? READ_ONLY_TOOLS
-    : [...READ_ONLY_TOOLS, ...WRITE_TOOLS];
+  const tools = [
+    ...READ_ONLY_TOOLS,
+    ...(ALLOW_DRAFTS ? DRAFT_TOOLS : []),
+    ...(READ_ONLY_MODE ? [] : WRITE_TOOLS),
+  ];
 
-  logger.debug(`Listing ${tools.length} tools (read-only: ${READ_ONLY_MODE})`, "MCPServer");
+  logger.debug(
+    `Listing ${tools.length} tools (read-only: ${READ_ONLY_MODE}, drafts: ${ALLOW_DRAFTS})`,
+    "MCPServer"
+  );
   return { tools };
 });
 
@@ -266,6 +309,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     throw new McpError(
       ErrorCode.InvalidRequest,
       `Operation "${name}" is disabled in read-only mode. Set READ_ONLY_MODE=false to enable.`
+    );
+  }
+
+  if (name === "create_draft" && !ALLOW_DRAFTS) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `Operation "create_draft" is disabled. Set ALLOW_DRAFTS=true to enable draft creation without enabling sending.`
     );
   }
 
@@ -396,6 +446,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         await imapService.syncFolder(folder);
         return {
           content: [{ type: "text", text: JSON.stringify({ synced: folder }) }]
+        };
+      }
+
+      // === DRAFT OPERATIONS (gated by ALLOW_DRAFTS, never send anything) ===
+
+      case "create_draft": {
+        const result = await imapService.createDraft({
+          to: args?.to as string,
+          cc: args?.cc as string | undefined,
+          bcc: args?.bcc as string | undefined,
+          subject: args?.subject as string,
+          body: args?.body as string,
+          isHtml: args?.isHtml as boolean | undefined,
+          from: args?.from as string | undefined,
+          inReplyTo: args?.inReplyTo as string | undefined,
+          references: args?.references as string | undefined
+        });
+
+        logger.info(`Draft created in "${result.folder}"`, "MCPServer");
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ success: true, sent: false, ...result }, null, 2)
+          }]
         };
       }
 

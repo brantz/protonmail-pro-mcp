@@ -7,6 +7,8 @@ import { simpleParser } from 'mailparser';
 import type { Email, Folder, SearchOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import { generateId } from '../utils/helpers.js';
+import { buildDraftMessage, resolveDraftsFolder } from '../utils/draft.js';
+import type { CreateDraftOptions } from '../utils/draft.js';
 
 export class SimpleIMAPService {
   private client: ImapFlow | null = null;
@@ -57,6 +59,28 @@ export class SimpleIMAPService {
 
   isConnectionActive(): boolean {
     return this.isConnected;
+  }
+
+  /**
+   * Store a message in the Drafts folder. Nothing is sent: the draft sits in
+   * Proton Mail until a human opens and sends it.
+   */
+  async createDraft(
+    options: Omit<CreateDraftOptions, 'from'> & { from?: string }
+  ): Promise<{ folder: string; uid?: number }> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('IMAP client is not connected');
+    }
+
+    const from = options.from || process.env.PROTONMAIL_USERNAME || '';
+    // Build before touching the mailbox so a bad address fails without a write.
+    const raw = buildDraftMessage({ ...options, from });
+
+    const folder = resolveDraftsFolder(await this.client.list());
+    const result = await this.client.append(folder, Buffer.from(raw, 'utf8'), ['\\Draft']);
+
+    logger.info(`Draft created in "${folder}"`, 'IMAPService');
+    return { folder, uid: (result as { uid?: number } | undefined)?.uid };
   }
 
   async getFolders(): Promise<Folder[]> {
