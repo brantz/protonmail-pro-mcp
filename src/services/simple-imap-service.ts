@@ -7,8 +7,8 @@ import { simpleParser } from 'mailparser';
 import type { Email, Folder, SearchOptions } from '../types/index.js';
 import { logger } from '../utils/logger.js';
 import { generateId } from '../utils/helpers.js';
-import { buildDraftMessage, resolveDraftsFolder } from '../utils/draft.js';
-import type { CreateDraftOptions } from '../utils/draft.js';
+import { buildDraftMessage, loadAttachments, resolveDraftsFolder } from '../utils/draft.js';
+import type { AttachmentInput, CreateDraftOptions, LoadAttachmentsOptions } from '../utils/draft.js';
 
 export class SimpleIMAPService {
   private client: ImapFlow | null = null;
@@ -66,21 +66,31 @@ export class SimpleIMAPService {
    * Proton Mail until a human opens and sends it.
    */
   async createDraft(
-    options: Omit<CreateDraftOptions, 'from'> & { from?: string }
-  ): Promise<{ folder: string; uid?: number }> {
+    options: Omit<CreateDraftOptions, 'from' | 'attachments'> & {
+      from?: string;
+      attachments?: AttachmentInput[];
+    },
+    attachmentOptions: LoadAttachmentsOptions = {}
+  ): Promise<{ folder: string; uid?: number; attachments: { filename: string; size: number }[] }> {
     if (!this.client || !this.isConnected) {
       throw new Error('IMAP client is not connected');
     }
 
     const from = options.from || process.env.PROTONMAIL_USERNAME || '';
-    // Build before touching the mailbox so a bad address fails without a write.
-    const raw = buildDraftMessage({ ...options, from });
+    // Load and build before touching the mailbox so a bad address or a
+    // missing file fails without a write.
+    const attachments = await loadAttachments(options.attachments, attachmentOptions);
+    const raw = buildDraftMessage({ ...options, from, attachments });
 
     const folder = resolveDraftsFolder(await this.client.list());
     const result = await this.client.append(folder, Buffer.from(raw, 'utf8'), ['\\Draft']);
 
     logger.info(`Draft created in "${folder}"`, 'IMAPService');
-    return { folder, uid: (result as { uid?: number } | undefined)?.uid };
+    return {
+      folder,
+      uid: (result as { uid?: number } | undefined)?.uid,
+      attachments: attachments.map(a => ({ filename: a.filename, size: a.content.length })),
+    };
   }
 
   async getFolders(): Promise<Folder[]> {
