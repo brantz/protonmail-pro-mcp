@@ -574,15 +574,6 @@ async function main() {
   logger.info("Starting Proton Mail MCP Server...", "MCPServer");
 
   try {
-    // Connect to IMAP (Proton Bridge)
-    logger.info("Connecting to IMAP...", "MCPServer");
-    try {
-      await imapService.connect();
-      logger.info("IMAP connected", "MCPServer");
-    } catch (imapError) {
-      logger.warn("IMAP connection failed - make sure Proton Bridge is running", "MCPServer", imapError);
-    }
-
     // Verify SMTP only if not in read-only mode
     if (!READ_ONLY_MODE) {
       logger.info("Verifying SMTP connection...", "MCPServer");
@@ -599,6 +590,13 @@ async function main() {
     await server.connect(transport);
 
     logger.info(`MCP Server started (read-only: ${READ_ONLY_MODE})`, "MCPServer");
+
+    // Connect to IMAP after the handshake so a slow or offline Bridge cannot time out the MCP connection;
+    // tool calls connect again on demand if this fails
+    imapService.connect().then(
+      () => logger.info("IMAP connected", "MCPServer"),
+      (imapError) => logger.warn("IMAP connection failed - make sure Proton Bridge is running", "MCPServer", imapError)
+    );
 
   } catch (error) {
     logger.error("Server startup failed", "MCPServer", error);

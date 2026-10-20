@@ -5,6 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 
 import { SimpleIMAPService } from '../dist/services/simple-imap-service.js';
 
@@ -78,9 +79,12 @@ test('createDraft returns the folder and uid it wrote to', async () => {
   assert.equal(result.uid, 7);
 });
 
-test('createDraft refuses to run without a connection', async () => {
+test('createDraft refuses to run when Bridge is unreachable', async () => {
   const service = new SimpleIMAPService();
-  await assert.rejects(() => service.createDraft(OPTIONS), /not connected/i);
+  service.createClient = () => Object.assign(new EventEmitter(), {
+    connect: async () => { throw new Error('ECONNREFUSED'); },
+  });
+  await assert.rejects(() => service.createDraft(OPTIONS), /not reachable/i);
 });
 
 test('createDraft surfaces a malformed recipient instead of appending', async () => {

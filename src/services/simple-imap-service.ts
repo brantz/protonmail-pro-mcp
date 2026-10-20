@@ -16,43 +16,73 @@ export class SimpleIMAPService {
   private emailCache: Map<string, Email> = new Map();
   private folderCache: Folder[] = [];
   private emailFolderMap: Map<string, string> = new Map(); // emailId -> folder
+  private connecting: Promise<void> | null = null;
 
-  async connect(): Promise<void> {
-    const host = process.env.PROTONMAIL_IMAP_HOST || 'localhost';
-    const port = parseInt(process.env.PROTONMAIL_IMAP_PORT || '1143', 10);
-    const username = process.env.PROTONMAIL_USERNAME || '';
-    const password = process.env.PROTONMAIL_PASSWORD || '';
-
-    this.client = new ImapFlow({
-      host,
-      port,
+  protected createClient(): ImapFlow {
+    return new ImapFlow({
+      host: process.env.PROTONMAIL_IMAP_HOST || 'localhost',
+      port: parseInt(process.env.PROTONMAIL_IMAP_PORT || '1143', 10),
       secure: false,
       auth: {
-        user: username,
-        pass: password,
+        user: process.env.PROTONMAIL_USERNAME || '',
+        pass: process.env.PROTONMAIL_PASSWORD || '',
       },
       logger: false,
+      // Fail fast when Bridge accepts the socket but cannot log in (offline, still syncing)
+      connectionTimeout: 15000,
+      greetingTimeout: 15000,
       tls: {
         rejectUnauthorized: false, // ProtonMail Bridge uses self-signed certificates
       },
     });
+  }
+
+  /**
+   * Connect on first use and again whenever Bridge has dropped the connection.
+   * Concurrent callers share one connect attempt.
+   */
+  async connect(): Promise<void> {
+    if (this.client && this.isConnected && this.client.usable !== false) return;
+    this.connecting ??= this.openConnection().finally(() => {
+      this.connecting = null;
+    });
+    return this.connecting;
+  }
+
+  private async openConnection(): Promise<void> {
+    const client = this.createClient();
+    // Without listeners an IMAP error becomes an uncaught exception and ends the process
+    client.on('error', (error: Error) => this.markDead(client, error));
+    client.on('close', () => this.markDead(client));
 
     try {
-      await this.client.connect();
-      this.isConnected = true;
-      logger.info('IMAP connection established', 'IMAPService');
+      await client.connect();
     } catch (error) {
-      this.isConnected = false;
+      this.markDead(client);
       logger.error('IMAP connection failed', 'IMAPService', error);
-      throw error;
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(`Proton Bridge not reachable: ${reason}`);
     }
+
+    this.client = client;
+    this.isConnected = true;
+    logger.info('IMAP connection established', 'IMAPService');
+  }
+
+  private markDead(client: ImapFlow, error?: Error): void {
+    if (error) logger.warn('IMAP connection error', 'IMAPService', error);
+    if (this.client !== client) return;
+    this.isConnected = false;
+    this.client = null;
+    logger.info('IMAP connection lost, reconnecting on next call', 'IMAPService');
   }
 
   async disconnect(): Promise<void> {
     if (this.client) {
-      await this.client.logout();
+      const client = this.client;
       this.isConnected = false;
       this.client = null;
+      await client.logout().catch(() => client.close());
       logger.info('IMAP connection closed', 'IMAPService');
     }
   }
@@ -72,7 +102,8 @@ export class SimpleIMAPService {
     },
     attachmentOptions: LoadAttachmentsOptions = {}
   ): Promise<{ folder: string; uid?: number; attachments: { filename: string; size: number }[] }> {
-    if (!this.client || !this.isConnected) {
+    await this.connect();
+    if (!this.client) {
       throw new Error('IMAP client is not connected');
     }
 
@@ -94,7 +125,8 @@ export class SimpleIMAPService {
   }
 
   async getFolders(): Promise<Folder[]> {
-    if (!this.client || !this.isConnected) {
+    await this.connect();
+    if (!this.client) {
       throw new Error('IMAP not connected');
     }
 
@@ -133,7 +165,8 @@ export class SimpleIMAPService {
   }
 
   async getEmails(folder: string = 'INBOX', limit: number = 50, offset: number = 0): Promise<{ emails: Email[]; totalMessages: number; hasMore: boolean }> {
-    if (!this.client || !this.isConnected) {
+    await this.connect();
+    if (!this.client) {
       throw new Error('IMAP not connected');
     }
 
@@ -220,7 +253,8 @@ export class SimpleIMAPService {
     }
 
     // If not in cache, try to fetch from IMAP
-    if (!this.client || !this.isConnected) {
+    await this.connect();
+    if (!this.client) {
       return null;
     }
 
@@ -260,7 +294,8 @@ export class SimpleIMAPService {
   }
 
   async searchEmails(options: SearchOptions): Promise<Email[]> {
-    if (!this.client || !this.isConnected) {
+    await this.connect();
+    if (!this.client) {
       throw new Error('IMAP not connected');
     }
 
@@ -353,7 +388,8 @@ export class SimpleIMAPService {
   }
 
   async markAsRead(emailId: string, isRead: boolean = true): Promise<void> {
-    if (!this.client || !this.isConnected) {
+    await this.connect();
+    if (!this.client) {
       throw new Error('IMAP not connected');
     }
 
@@ -387,7 +423,8 @@ export class SimpleIMAPService {
   }
 
   async starEmail(emailId: string, isStarred: boolean = true): Promise<void> {
-    if (!this.client || !this.isConnected) {
+    await this.connect();
+    if (!this.client) {
       throw new Error('IMAP not connected');
     }
 
@@ -421,7 +458,8 @@ export class SimpleIMAPService {
   }
 
   async moveEmail(emailId: string, targetFolder: string): Promise<void> {
-    if (!this.client || !this.isConnected) {
+    await this.connect();
+    if (!this.client) {
       throw new Error('IMAP not connected');
     }
 
@@ -453,7 +491,8 @@ export class SimpleIMAPService {
   }
 
   async deleteEmail(emailId: string): Promise<void> {
-    if (!this.client || !this.isConnected) {
+    await this.connect();
+    if (!this.client) {
       throw new Error('IMAP not connected');
     }
 
