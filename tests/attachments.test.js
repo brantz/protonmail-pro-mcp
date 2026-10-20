@@ -5,7 +5,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, symlink, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { simpleParser } from 'mailparser';
@@ -165,51 +165,6 @@ test('loadAttachments enforces the total size limit', async () => {
   );
 });
 
-test('loadAttachments allows paths inside allowedDirs', async (t) => {
-  const dir = await tempDir(t);
-  const file = join(dir, 'ok.txt');
-  await writeFile(file, 'x');
-  const [att] = await loadAttachments([{ path: file }], { allowedDirs: [dir] });
-  assert.equal(att.filename, 'ok.txt');
-});
-
-test('loadAttachments refuses paths outside allowedDirs', async (t) => {
-  const root = await tempDir(t);
-  const allowed = join(root, 'allowed');
-  await mkdir(allowed);
-  const outside = join(root, 'secret.txt');
-  await writeFile(outside, 'x');
-  await assert.rejects(
-    () => loadAttachments([{ path: outside }], { allowedDirs: [allowed] }),
-    /outside the allowed/
-  );
-});
-
-test('loadAttachments refuses a symlink that escapes allowedDirs', async (t) => {
-  const root = await tempDir(t);
-  const allowed = join(root, 'allowed');
-  await mkdir(allowed);
-  const outside = join(root, 'secret.txt');
-  await writeFile(outside, 'x');
-  await symlink(outside, join(allowed, 'link.txt'));
-  await assert.rejects(
-    () => loadAttachments([{ path: join(allowed, 'link.txt') }], { allowedDirs: [allowed] }),
-    /outside the allowed/
-  );
-});
-
-test('loadAttachments refuses a sibling directory sharing the allowed prefix', async (t) => {
-  const root = await tempDir(t);
-  await mkdir(join(root, 'docs'));
-  await mkdir(join(root, 'docs-private'));
-  const file = join(root, 'docs-private', 'x.txt');
-  await writeFile(file, 'x');
-  await assert.rejects(
-    () => loadAttachments([{ path: file }], { allowedDirs: [join(root, 'docs')] }),
-    /outside the allowed/
-  );
-});
-
 function fakeClient() {
   const calls = [];
   return {
@@ -255,21 +210,6 @@ test('createDraft does not append when an attachment cannot be loaded', async (t
       body: 'Hallo',
       attachments: [{ path: join(dir, 'fehlt.pdf') }],
     })
-  );
-  assert.equal(client.calls.length, 0);
-});
-
-test('createDraft passes allowedDirs through to the loader', async (t) => {
-  const root = await tempDir(t);
-  const file = join(root, 'x.txt');
-  await writeFile(file, 'x');
-  const client = fakeClient();
-  await assert.rejects(
-    () => serviceWith(client).createDraft(
-      { to: 'empfaenger@example.com', subject: 's', body: 'b', attachments: [{ path: file }] },
-      { allowedDirs: [join(root, 'nope')] }
-    ),
-    /outside the allowed/
   );
   assert.equal(client.calls.length, 0);
 });

@@ -79,9 +79,6 @@ READ_ONLY_MODE=true
 # there until a human sends it, so it is safe to grant to an agent while
 # READ_ONLY_MODE remains true.
 ALLOW_DRAFTS=true
-# Optional: restrict create_draft attachment paths to these directories
-# (separated by ":" like PATH). Unset means any file this process can read.
-ATTACHMENT_DIRS=/Users/me/Documents/outgoing:/Users/me/Downloads
 ```
 
 ### Capability tiers
@@ -133,8 +130,7 @@ Add to your Claude Desktop MCP configuration:
   is sent. Handles RFC 2047 subject encoding for umlauts and CRLF normalisation.
   Accepts `attachments`, each either a local `path` or base64 `content` with a
   `filename`. The MIME type is guessed from the extension unless `contentType`
-  is given. Total size is capped at 25 MB, and paths can be limited with
-  `ATTACHMENT_DIRS`.
+  is given. Total size is capped at 25 MB.
 
 **Verified Proton Bridge behaviour (2026-07-29):** the Bridge rewrites the
 message on APPEND. It assigns its own `Message-Id`, replaces `References` with

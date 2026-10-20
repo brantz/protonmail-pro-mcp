@@ -24,8 +24,6 @@ import {
   ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 
-import path from "node:path";
-
 import { ProtonMailConfig } from './types/index.js';
 import { SMTPService } from './services/smtp-service.js';
 import { SimpleIMAPService } from './services/simple-imap-service.js';
@@ -45,12 +43,6 @@ const READ_ONLY_MODE = process.env.READ_ONLY_MODE !== "false"; // Default: true 
 // Drafts are their own tier: a draft is never sent and destroys nothing, so it
 // can be allowed without opening up send/delete.
 const ALLOW_DRAFTS = process.env.ALLOW_DRAFTS === "true" || !READ_ONLY_MODE;
-// Optional allowlist for create_draft attachment paths, separated like PATH.
-// Unset means any file readable by this process may be attached.
-const ATTACHMENT_DIRS = (process.env.ATTACHMENT_DIRS || "")
-  .split(path.delimiter)
-  .map((dir) => dir.trim())
-  .filter(Boolean);
 
 // Validate required environment variables
 if (!PROTONMAIL_USERNAME || !PROTONMAIL_PASSWORD) {
@@ -486,7 +478,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           inReplyTo: args?.inReplyTo as string | undefined,
           references: args?.references as string | undefined,
           attachments: args?.attachments as AttachmentInput[] | undefined
-        }, { allowedDirs: ATTACHMENT_DIRS });
+        });
 
         logger.info(`Draft created in "${result.folder}"`, "MCPServer");
 

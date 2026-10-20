@@ -6,8 +6,8 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { readFile, realpath, stat } from 'node:fs/promises';
-import { basename, extname, resolve, sep } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { basename, extname, resolve } from 'node:path';
 
 import { parseEmails, isValidEmail } from './helpers.js';
 
@@ -30,8 +30,6 @@ export interface AttachmentInput {
 }
 
 export interface LoadAttachmentsOptions {
-  /** When non-empty, every path must resolve inside one of these directories. */
-  allowedDirs?: string[];
   /** Upper bound on the decoded size of all attachments together. */
   maxTotalBytes?: number;
 }
@@ -210,24 +208,13 @@ function attachmentPart(attachment: DraftAttachment): string {
   ].join('\r\n');
 }
 
-function isInside(file: string, dir: string): boolean {
-  return file === dir || file.startsWith(dir.endsWith(sep) ? dir : dir + sep);
-}
-
-async function loadOne(input: AttachmentInput, allowedDirs: string[]): Promise<DraftAttachment> {
+async function loadOne(input: AttachmentInput): Promise<DraftAttachment> {
   if (input.path && input.content) {
     throw new Error(`Attachment ${input.filename ?? input.path}: give either path or content, not both`);
   }
 
   if (input.path) {
-    // realpath so a symlink cannot lead outside the allowed directories.
-    const file = await realpath(resolve(input.path));
-    if (allowedDirs.length) {
-      const roots = await Promise.all(allowedDirs.map(dir => realpath(resolve(dir)).catch(() => null)));
-      if (!roots.some(root => root && isInside(file, root))) {
-        throw new Error(`Attachment path is outside the allowed directories: ${input.path}`);
-      }
-    }
+    const file = resolve(input.path);
     if (!(await stat(file)).isFile()) throw new Error(`Attachment is not a regular file: ${input.path}`);
     return {
       filename: input.filename || basename(file),
@@ -266,7 +253,7 @@ export async function loadAttachments(
   const attachments: DraftAttachment[] = [];
   let total = 0;
   for (const input of inputs) {
-    const attachment = await loadOne(input, options.allowedDirs ?? []);
+    const attachment = await loadOne(input);
     total += attachment.content.length;
     if (total > maxTotalBytes) {
       throw new Error(
